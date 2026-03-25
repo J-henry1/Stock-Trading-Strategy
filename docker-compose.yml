@@ -1,0 +1,28 @@
+# ============================================================
+# Stock Sentiment Predictor — Docker Compose
+# ============================================================
+# Usage:
+#   docker compose up --build          # Start the API
+#   docker compose run api python scripts/train_model.py  # Train model
+# ============================================================
+
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: stock-predictor-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist trained models across container restarts
+      - ./models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
