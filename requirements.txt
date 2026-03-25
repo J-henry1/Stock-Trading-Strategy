@@ -17,7 +17,7 @@ pandas==2.2.3
 numpy==1.26.4
 
 # --- Stock Data (Free — Yahoo Finance) ---
-yfinance==0.2.51
+yfinance>=0.2.51
 
 # --- News API Client ---
 requests==2.32.3
