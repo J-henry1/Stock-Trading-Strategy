@@ -34,6 +34,9 @@ class PriceService:
             if hist.empty:
                 logger.warning(f"No price data returned for {ticker}")
                 return None
+            
+            if isinstance(hist.columns, pd.MultiIndex):
+                hist = hist.droplevel("Ticker", axis=1)
 
             latest = hist.iloc[-1]
             return {
@@ -75,6 +78,8 @@ class PriceService:
                 return None
 
             # Clean the dataframe
+            if isinstance(hist.columns, pd.MultiIndex):
+                hist = hist.droplevel("Ticker", axis=1)
             hist = hist[["Open", "High", "Low", "Close", "Volume"]].copy()
             hist.index = pd.to_datetime(hist.index).tz_localize(None)
             hist = hist.dropna()

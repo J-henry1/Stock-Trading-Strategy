@@ -1,120 +1,152 @@
 """
-Sentiment analysis engine using an ensemble of:
-  1. VADER (Valence Aware Dictionary and sEntiment Reasoner) — rule-based
-  2. TextBlob — NLP pattern-based
+Sentiment analysis engine using FinBERT.
 
-Both are free, local libraries with no API limits.
+FinBERT is a BERT model fine-tuned on financial text (earnings calls,
+analyst reports, financial news). It understands financial phrases like
+"beats estimates" (bullish) and "guidance lowered" (bearish) that
+general-purpose tools like VADER miss.
+
+Model: ProsusAI/finbert (HuggingFace)
+  - 3 classes: positive, negative, neutral
+  - Trained on Reuters TRC-2 financial corpus + Financial PhraseBank
+  - ~65% accuracy on financial sentiment vs ~50% for VADER
+
+First run downloads ~440MB model weights, cached thereafter.
+Runs on CPU; ~1-2 seconds per batch of headlines.
 """
 
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from textblob import TextBlob
-from typing import Dict, List, Optional
+from typing import Dict, List
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class SentimentAnalyzer:
-    """Computes sentiment scores from news article text."""
+    """Computes FinBERT sentiment scores from news article text."""
+
+    _model = None
+    _tokenizer = None
 
     def __init__(self):
-        self.vader = SentimentIntensityAnalyzer()
+        if SentimentAnalyzer._model is None:
+            self._load_model()
+
+    @classmethod
+    def _load_model(cls):
+        """Lazy-load FinBERT on first use."""
+        try:
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+            import torch
+
+            logger.info("Loading FinBERT model (first run downloads ~440MB)...")
+            model_name = "ProsusAI/finbert"
+            cls._tokenizer = AutoTokenizer.from_pretrained(model_name)
+            cls._model = AutoModelForSequenceClassification.from_pretrained(model_name)
+            cls._model.eval()
+            cls._torch = torch
+            logger.info("FinBERT loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load FinBERT: {e}")
+            raise
 
     def analyze_text(self, text: str) -> Dict[str, float]:
         """
-        Analyze a single text string and return sentiment scores.
+        Score a single text string.
 
         Returns:
             {
-                "compound": float,   # VADER compound [-1, 1]
-                "positive": float,   # VADER positive [0, 1]
-                "negative": float,   # VADER negative [0, 1]
-                "neutral": float,    # VADER neutral [0, 1]
-                "polarity": float,   # TextBlob polarity [-1, 1]
-                "subjectivity": float # TextBlob subjectivity [0, 1]
+                "positive": float [0, 1],
+                "negative": float [0, 1],
+                "neutral":  float [0, 1],
+                "compound": float [-1, 1]  (positive - negative, for XGBoost compatibility)
             }
         """
         if not text or not text.strip():
             return self._neutral_scores()
 
-        # VADER scores
-        vader_scores = self.vader.polarity_scores(text)
+        try:
+            inputs = self._tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True,
+            )
 
-        # TextBlob scores
-        blob = TextBlob(text)
+            with self._torch.no_grad():
+                outputs = self._model(**inputs)
+                probs = self._torch.nn.functional.softmax(outputs.logits, dim=-1)
+                probs = probs[0].tolist()
 
-        return {
-            "compound": vader_scores["compound"],
-            "positive": vader_scores["pos"],
-            "negative": vader_scores["neg"],
-            "neutral": vader_scores["neu"],
-            "polarity": blob.sentiment.polarity,
-            "subjectivity": blob.sentiment.subjectivity,
-        }
+            # FinBERT label order: [positive, negative, neutral]
+            positive, negative, neutral = probs[0], probs[1], probs[2]
+            compound = positive - negative
+
+            return {
+                "positive": positive,
+                "negative": negative,
+                "neutral": neutral,
+                "compound": compound,
+            }
+        except Exception as e:
+            logger.error(f"FinBERT scoring error: {e}")
+            return self._neutral_scores()
 
     def analyze_articles(self, articles: List[Dict]) -> Dict[str, float]:
         """
-        Analyze a list of news articles and return aggregated sentiment.
+        Score a list of articles and aggregate.
 
-        Each article should have 'title' and optionally 'description' keys.
-        We analyze both title and description, weighted:
-            - Title: 60% weight (headlines carry strong signal)
-            - Description: 40% weight
-
-        Returns aggregated (mean) sentiment scores + article count.
+        Title gets 60% weight, description 40% — headlines carry stronger signal.
+        Returns mean scores across all articles + news volume + latest headline.
         """
         if not articles:
             scores = self._neutral_scores()
+            scores["subjectivity"] = 0.0
             scores["news_volume"] = 0
             scores["latest_headline"] = ""
             return scores
 
         all_scores = []
-
         for article in articles:
             title = article.get("title", "")
             description = article.get("description", "")
 
-            # Analyze title
             title_scores = self.analyze_text(title)
+            desc_scores = (
+                self.analyze_text(description)
+                if description
+                else self._neutral_scores()
+            )
 
-            # Analyze description
-            desc_scores = self.analyze_text(description) if description else self._neutral_scores()
-
-            # Weighted combination
-            combined = {}
-            for key in title_scores:
-                combined[key] = title_scores[key] * 0.6 + desc_scores[key] * 0.4
-
+            combined = {
+                key: title_scores[key] * 0.6 + desc_scores[key] * 0.4
+                for key in title_scores
+            }
             all_scores.append(combined)
 
-        # Aggregate: mean across all articles
+        # Average across articles
         aggregated = {}
-        keys = all_scores[0].keys()
-        for key in keys:
-            values = [s[key] for s in all_scores]
-            aggregated[key] = sum(values) / len(values)
+        for key in all_scores[0]:
+            vals = [s[key] for s in all_scores]
+            aggregated[key] = sum(vals) / len(vals)
 
-        # Add metadata
+        # Subjectivity proxy: 1 - neutral (opinionated text has lower neutral prob)
+        aggregated["subjectivity"] = 1.0 - aggregated.get("neutral", 1.0)
         aggregated["news_volume"] = len(articles)
         aggregated["latest_headline"] = articles[0].get("title", "")
 
         logger.info(
-            f"Sentiment analysis: {len(articles)} articles, "
+            f"FinBERT sentiment: {len(articles)} articles, "
             f"compound={aggregated['compound']:.3f}, "
             f"news_volume={aggregated['news_volume']}"
         )
-
         return aggregated
 
     @staticmethod
     def _neutral_scores() -> Dict[str, float]:
-        """Return neutral sentiment scores (no signal)."""
         return {
-            "compound": 0.0,
             "positive": 0.0,
             "negative": 0.0,
             "neutral": 1.0,
-            "polarity": 0.0,
-            "subjectivity": 0.0,
+            "compound": 0.0,
         }

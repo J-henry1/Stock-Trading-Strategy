@@ -13,10 +13,10 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables / .env file."""
 
     # --- API Keys ---
-    gnews_api_key: str = Field(
-        default="",
-        description="GNews API key from https://gnews.io"
-    )
+    finnhub_api_key: str = Field(
+            default="",
+            description="Finnhub API key from https://finnhub.io"
+        )
 
     # --- Server ---
     app_host: str = Field(default="0.0.0.0")
@@ -62,6 +62,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra:"ignore"
 
 
 # Singleton instance
